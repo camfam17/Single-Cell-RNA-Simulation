@@ -1,0 +1,517 @@
+---
+title: "Part 2"
+output: html_document
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+# Load libraries
+```{r}
+
+suppressPackageStartupMessages({
+  library(scDesign2)
+  library(Matrix)
+  library(Matrix.utils)
+  library(Seurat)
+  library(plyr)
+  library(dplyr)
+  library(sctransform)
+  library(igraph)
+  library(factoextra)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(EpicTools)
+  require(Hmisc)
+  require(dplyr)
+  require(openxlsx)
+  require(ggplot2)
+  library(ggpubr)
+  library(rlang)
+  require(cowplot)
+  library(data.table)
+  library(RColorBrewer)
+  library(rowr)
+  library(SingleR)
+  library(scater)
+  library(pheatmap)
+  library(nichenetr)
+  library(tidyverse)
+  library(SimBench)
+  library(parallel)
+  library(DESeq2)
+  library(UCell)
+  library(scuttle)
+})
+
+set.seed(1)
+RNGkind("L'Ecuyer-CMRG")   # good practice for parallel RNG
+```
+
+
+# Specify analysis parameters:
+  - output folder
+  - cell type label meta.data column
+  - rare cell type label
+  - cor gene signature of MAIT cells used from https://www.nature.com/articles/s41590-023-01575-1 
+```{r}
+
+output.folder = "~/TidyFolder/data/part2/"
+
+label_granularity <- "fine" # coarse # fine
+
+rare.cell.type <- "MAIT"
+
+genes.signature <- c("KLRB1", "IL7R", "LTB", "CEBPD", "FOS", "AQP3", "SLC4A10", "DUSP1", "CCR6", "ZBTB16", "NCR3", "TEX14", "JUN", "AC245014.3", "NFKBIA", "IL4I1", "CD69", "PHACTR2", "ERN1", "NFKBIZ", "TNFAIP3", "RORA", "SPOCK2", "TMIGD2", "TLE1", "ALOX5AP", "FOSB", "RPLP0", "NOSIP", "JAML", "CTSA", "LST1", "DPP4", "GPR65", "LINC00910", "CROCC", "SATB1", "MYC", "LTK", "AC020916.1", "IL18RAP", "MPZL3", "SNX9", "TOB1", "TTC39C", "ZFP36L1", "FLT3LG", "RUNX2", "INTS6", "CAMK4", "BACH2", "LINC01644", "SLC7A5", "PDE4D", "ODF2L", "ATF7IP2", "PIM2", "GPR183", "BLK", "PLCB1", "PABPC1", "TNFRSF25", "COLQ", "PPP1R15A", "RPLP1", "LGALS3", "DUSP16", "RCAN3", "BTG1", "GTF3C1", "IL23R", "CERK", "MAP3K4", "KDM6B", "CXCR6", "RORC", "AC022217.3", "TC2N", "FKBP11", "CD28", "EEF1G", "PRR5", "GPRIN3", "PER1", "ZC3H12A", "ADAM12", "RPS13", "PBXIP1", "PIM1", "ME1", "RORA-AS1", "SERP1", "HPGD", "DUSP2", "LINC01871", "GYG1", "CD40LG", "TPT1", "MYBL1", "CDC14A")
+
+```
+
+
+# Load and subset data
+```{r}
+
+scdata = readRDS("~/MAITSim/COVIDatlas_MAIT_labelled.seu.rds")
+scdata$simulator.cell.type <- scdata@meta.data[paste("cell.type.", label_granularity, sep="")]
+Idents(scdata) <- "simulator.cell.type"
+
+# Subset: i.e. Donor = H1, Status = Healthy
+target <- "All" # COVID, All, Healthy
+column <- "Status" # Donor
+
+print("Subsetting Suerat obj")
+if(tolower(target) != 'all'){
+  keep_cells <- scdata@meta.data[[column]] == target
+  scdata <- subset(scdata, cells = colnames(scdata)[keep_cells])
+}
+
+```
+
+# Extract and label count matrix
+```{r}
+
+rawcount.filename <- paste(output.folder, "1to1raw_", column, "_", target, ".rds", sep="")
+
+if (file.exists(rawcount.filename)){
+  rawcounts = readRDS(rawcount.filename)
+}else{
+  rawcounts <- GetAssayData(scdata, assay = "RNA", slot = "counts")
+  labels <- scdata@meta.data[colnames(rawcounts), "simulator.cell.type"] # Label count matrix with cell type for scDesign2
+  colnames(rawcounts) <- labels
+  
+  saveRDS(rawcounts, file = rawcount.filename)
+}
+
+```
+
+
+# Fit(or load) Model
+```{r}
+
+fit.filename <- paste(output.folder, "1to1fit_", column, "_", target, ".rds", sep="")
+
+
+if (file.exists(fit.filename)){
+  fit <- readRDS(fit.filename)
+}else{
+
+  print("fitting model")
+  fit <- fit_model_scDesign2(data_mat = rawcounts,
+                             cell_type_sel = sort(unique(colnames(rawcounts))),
+                             sim_method = "copula",
+                             marginal = "auto_choose",
+                             zp_cutoff = 0.8,
+                             ncores = min(9, length(unique(colnames(rawcounts))))
+  )
+  print("model fitted")
+  saveRDS(fit, file =fit.filename)
+}
+
+```
+
+
+# Specify Grid Search parameter ranges
+```{r}
+
+n_cell_old <- sum(sapply(fit, function(x) x$n_cell))
+n_depth_old <- sum(sapply(fit, function(x) x$n_read))
+
+# Grid search values
+cell_lower_multiplier <- 0.5
+cell_upper_multiplier <- 2
+cell_num_of_steps <- 6
+
+depth_lower_multiplier <- 0.5
+depth_upper_multiplier <- 2
+depth_num_of_steps <- 6
+
+```
+
+
+```{r}
+
+## Cell
+cell_range <- cell_upper_multiplier - cell_lower_multiplier
+cell_step_size <- cell_range / cell_num_of_steps
+
+cell_grid <- seq(from = cell_lower_multiplier, 
+                 to = cell_upper_multiplier, 
+                 by = cell_step_size)
+  
+cell_grid_fold <- paste0(sprintf("%.2f", round(cell_grid, 2)), "x")
+cat("Multiples of original datasets' cell count: ", cell_grid_fold, "\n")
+
+cell_grid <- cell_grid * n_cell_old
+cell_grid <- round(cell_grid)
+cat("Cell counts for simulation: ", cell_grid, "\n")
+
+
+## Depth
+depth_range <- depth_upper_multiplier - depth_lower_multiplier
+depth_step_size <- depth_range / depth_num_of_steps
+
+depth_grid <- seq(from = depth_lower_multiplier, 
+                  to = depth_upper_multiplier, 
+                  by = depth_step_size)
+
+depth_grid_fold <- paste0(sprintf("%.2f", round(depth_grid, 2)), "x")
+cat("Multiples of original datasets' sequencing depth: ", depth_grid_fold, "\n")
+
+depth_grid <- depth_grid * n_depth_old
+depth_grid <- round(depth_grid)
+cat("Sequencing depths for simulation: ", depth_grid, "\n")
+
+cat("Number of Grid steps: ", (length(cell_grid) * length(depth_grid)))
+
+```
+
+# Simulate across parameter sets
+```{r}
+
+for(c in seq_len(length(cell_grid))){
+  cell_count_new <- cell_grid[c]
+  for(d in seq_len(length(depth_grid))){
+    depth_new <- depth_grid[d]
+    
+    sim.filename <- paste(output.folder, "sim_", column, "_", target, "_", 
+                          cell_grid_fold[c], "cell_", depth_grid_fold[d], "depth", ".rds", sep="")
+    
+    if (file.exists(sim.filename)){
+      next
+    }
+    
+    print('simulating')
+    sim <- simulate_count_scDesign2(
+      model_params   = fit,
+      n_cell_new     = cell_count_new,
+      cell_type_prop = prop.table(table(colnames(rawcounts))),
+      total_count_new = depth_new,
+      sim_method     = "copula",
+      reseq_method   = "mean_scale",
+      cell_sample    = FALSE
+    )
+    rownames(sim) <- rownames(rawcounts)
+    simcount1 <- Matrix(sim, sparse = TRUE)
+
+    saveRDS(sim, file = sim.filename)
+    print("data saved")
+  }
+}
+
+```
+
+
+```{r}
+
+plot_grid_heatmap <- function(
+  df,
+  value_col,
+  axes = c("index", "value", "fold"),
+  title        = NULL,
+  reverse_cell = TRUE,
+  show_text    = TRUE,
+  text_col     = NULL,
+  line_width   = 0.3,
+  decimals     = 5) {
+  axes <- match.arg(axes)
+
+  cell_col  <- "cell"
+  depth_col <- "depth"
+
+  val_sym   <- sym(value_col)
+  cell_sym  <- sym(cell_col)
+  depth_sym <- sym(depth_col)
+
+  cell_vec  <- df[[cell_col]]
+  depth_vec <- df[[depth_col]]
+
+  ord_fun <- function(x) {
+    if (is.numeric(x)) sort(unique(x)) else unique(x)
+  }
+
+  cell_levels  <- ord_fun(cell_vec)
+  depth_levels <- ord_fun(depth_vec)
+  if (reverse_cell) cell_levels <- rev(cell_levels)
+
+  df[[cell_col]]  <- factor(cell_vec,  levels = cell_levels)
+  df[[depth_col]] <- factor(depth_vec, levels = depth_levels)
+
+  # Tick labels
+  if (axes == "index") {
+    x_labels <- df[["x"]]
+    y_labels <- df[["y"]]
+  } else if (axes == "value") {
+    x_labels <- df[["depth"]]
+    y_labels <- df[["cell"]]
+  } else {
+    x_labels <- df[["depth_fold"]]
+    y_labels <- df[["cell_fold"]]
+  }
+  x_lab_map <- setNames(as.character(x_labels), df[[depth_col]])
+  y_lab_map <- setNames(as.character(y_labels), df[[cell_col]])
+
+  # Text overlay labels
+  if (show_text) {
+    if (is.null(text_col)) text_col <- value_col
+    if (is.numeric(df[[text_col]])) {
+      df[[".label_text"]] <- vapply(df[[text_col]], function(x) {
+        if (x == round(x)) as.character(round(x)) 
+        else sprintf(paste0("%.", decimals, "f"), x)
+      }, character(1))
+    } else {
+      df[[".label_text"]] <- as.character(df[[text_col]])
+    }
+  }
+
+  # Plot
+  p <- ggplot(df, aes(x = !!depth_sym, y = !!cell_sym, fill = !!val_sym)) +
+    geom_tile(color = if (line_width > 0) "black" else NA, linewidth = line_width) +
+    scale_fill_viridis_c(option = "viridis") +
+    labs(x = "Sequencing depth", y = "Cell count", fill = value_col, title = title) +
+    scale_x_discrete(position = "top", labels = x_lab_map) +
+    scale_y_discrete(labels = y_lab_map) +
+    coord_fixed() +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank())
+
+  if (show_text) {
+    p <- p + geom_text(aes(label = .label_text), size = 3)
+  }
+
+  p
+}
+
+
+summarize_basic <- function(simsce, param_df, idx) {
+  simmat <- counts(simsce)
+  
+  # Rare cell proportion and counts
+  prop_rare <- sum(colData(simsce)$celltype == rare.cell.type) / ncol(simsce)
+  param_df$prop_rare[idx] <- prop_rare
+  param_df$n_cells_detected[idx] <- sum(colData(simsce)$celltype == rare.cell.type)
+  
+  # Sparsity
+  param_df$zero_prop[idx] <- sum(simmat == 0) / length(simmat)
+  
+  # Mitochondrial content
+  mt_genes <- grep("^MT-", rownames(simsce), value = TRUE)
+  if (length(mt_genes) > 0) {
+    mito_counts  <- colSums(simmat[mt_genes, , drop = FALSE])
+    total_counts <- colSums(simmat)
+    pct_mito <- mito_counts / total_counts
+    param_df$pct_mito[idx] <- mean(pct_mito, na.rm = TRUE)
+  } else {
+    param_df$pct_mito[idx] <- NA
+  }
+  
+  # Library size / gene complexity
+  param_df$ave_lib_size[idx] <- mean(colSums(simmat))
+  param_df$med_lib_size[idx] <- median(colSums(simmat))
+  
+  # Per-cell zero fraction
+  cell_zero_frac <- colMeans(simmat == 0)
+  param_df$median_zero_frac[idx] <- median(cell_zero_frac) 
+  
+  # Per-gene detection fraction
+  gene_detect_frac <- rowMeans(simmat > 0)
+  param_df$median_gene_detect_frac[idx] <- median(gene_detect_frac) 
+  
+  # Fraction of counts in top-50 genes (captures ambient shift)
+  top <- sort(rowSums(simmat), decreasing=TRUE)
+  param_df$frac_counts_top50[idx] <- sum(head(top, 50))/sum(top) 
+  
+  
+  gmean <- rowMeans(simmat)
+  gvar  <- apply(simmat, 1, var)
+  gene_zero_frac <- rowMeans(simmat == 0)
+  param_df$mean_vs_zero_cor[idx] <- cor(gmean, gene_zero_frac, method="spearman")
+  
+  return(param_df)
+}
+
+# helpers
+recall_at_k <- function(score, truth01, K) {
+  Npos <- sum(truth01 == 1)
+  if (Npos == 0 || K <= 0) return(NA_real_)
+  ord  <- order(score, decreasing = TRUE)
+  topK <- ord[seq_len(min(K, length(score)))]
+  sum(truth01[topK] == 1) / Npos
+}
+
+precision_at_k <- function(score, truth01, K) {
+  N <- length(truth01); if (N == 0 || K <= 0) return(NA_real_)
+  ord  <- order(score, decreasing = TRUE)
+  topK <- ord[seq_len(min(K, N))]
+  pos_in_topK <- sum(truth01[topK] == 1)
+  pos_in_topK / K
+}
+
+enrich_at_k <- function(score, truth01, K) {
+  N <- length(truth01); if (N == 0 || K <= 0) return(NA_real_)
+  prev <- mean(truth01 == 1)
+  if (prev == 0) return(NA_real_)
+  ord  <- order(score, decreasing = TRUE)
+  topK <- ord[seq_len(min(K, N))]
+  pos_in_topK <- sum(truth01[topK] == 1)
+  (pos_in_topK / K) / prev
+}
+
+```
+
+
+# Benchmark simulated datasets
+```{r}
+
+paramdf.filename <- paste(output.folder, "param_df_", column, "_", target, ".rds", sep="")
+
+if (!file.exists(paramdf.filename)){
+  param_df <- expand.grid(cell  = cell_grid,depth = depth_grid, stringsAsFactors = FALSE)
+  param_df$cell_fold  <- rep(cell_grid_fold, times = length(cell_grid))
+  param_df$depth_fold <- rep(depth_grid_fold, each = length(depth_grid))
+  param_df$processed <- FALSE
+}else{
+  param_df <- readRDS(paramdf.filename)
+}
+
+for (idx in seq_len(nrow(param_df))){
+  cat(idx, "/", (length(cell_grid) * length(depth_grid)), "\n")
+  
+  if (isTRUE(param_df$processed[idx])){
+    next
+  }
+  
+  print("init df")
+  param_df$idx[idx] <- idx
+  param_df$x[idx] <- ((idx - 1) %/% length(depth_grid)) + 1
+  param_df$y[idx] <- ((idx - 1) %% length(cell_grid)) + 1
+  param_df$coord[idx] <- paste(((idx - 1) %/% length(depth_grid)) + 1, ", ", ((idx - 1) %% length(cell_grid)) + 1)
+  
+  print("load simmat")
+  sim.filename <- paste(output.folder, "sim_", column, "_", target, "_", param_df$cell_fold[idx], "cell_", param_df$depth_fold[idx], "depth", ".rds", sep="")
+  print(sim.filename)
+  simmat <- readRDS(file = sim.filename)
+  sim_labels <- as.character(colnames(simmat))
+  colnames(simmat) <- make.unique(sim_labels, sep = "_cell")
+  simsce <- SingleCellExperiment(assays = list(counts = simmat))
+  colData(simsce)$celltype  <- factor(sim_labels)
+
+  ### Basic stats
+  param_df <- summarize_basic(simsce, param_df, idx)
+
+  ### MAIT cell gene signature
+  scores <- ScoreSignatures_UCell(simmat, features=list(signature167=genes.signature), ncores=5)
+  colData(simsce)$signature167_UCell <- scores[, "signature167_UCell"]
+  celltype <- sub("_.*$", "", rownames(scores))
+  param_df$mait_value[idx] <- mean(scores[celltype == "MAIT", "signature167_UCell"], na.rm = TRUE)
+  
+
+  ## Rare-cell recoverability metrics (Recall@K, Enrichment@K)
+  score <- colData(simsce)$signature167_UCell
+  truth01 <- as.integer(colData(simsce)$celltype == rare.cell.type)  # simulator truth (1=MAIT)
+  
+  N <- length(truth01)
+  Npos <- sum(truth01 == 1)
+
+  ## choose K:
+  K_exp   <- max(1, Npos)                 # expected MAIT count
+  K_1pct  <- max(1, round(0.01 * N))      # top 1% of cells
+
+  ## compute metrics
+  recall_exp  <- recall_at_k(score, truth01, K_exp)
+  prec_exp    <- precision_at_k(score, truth01, K_exp)
+  f1_exp <- ifelse(prec_exp+recall_exp==0, 0, 2*prec_exp*recall_exp/(prec_exp+recall_exp))
+  enrich_exp    <- enrich_at_k(score, truth01, K_exp)
+
+  recall_1pct <- recall_at_k(score, truth01, K_1pct)
+  prec_1pct   <- precision_at_k(score, truth01, K_1pct)
+  f1_1pct <- ifelse(prec_1pct+recall_1pct==0, 0, 2*prec_1pct*recall_1pct/(prec_1pct+recall_1pct))
+  enrich_1pct   <- enrich_at_k(score, truth01, K_1pct)
+
+  ## store in param_df for this grid point
+  param_df$recall_at_Kexp[idx] <- recall_exp
+  param_df$precision_at_Kexp[idx] <- prec_exp
+  param_df$f1_at_Kexp[idx]        <- f1_exp
+  param_df$enrich_at_Kexp[idx]   <- enrich_exp
+  
+  param_df$recall_at_1pct[idx] <- recall_1pct
+  param_df$precision_at_1pct[idx] <- prec_1pct
+  param_df$f1_at_1pct[idx]        <- f1_1pct
+  param_df$enrich_at_1pct[idx]   <- enrich_1pct
+  
+  
+  param_df$processed[idx] <- TRUE
+  saveRDS(param_df, paramdf.filename)
+}
+
+```
+
+# Visualise fidelity metrics
+```{r}
+
+plot_grid_heatmap(df=param_df, value_col="n_cells_detected", axes="fold", title="Number of Rare Cells")
+plot_grid_heatmap(df=param_df, value_col="prop_rare", axes="fold", title="Proportion of Rare Cells")
+plot_grid_heatmap(df=param_df, value_col="zero_prop", axes="fold", title="Sparisty of Count Matrix (proportion of zeros)", decimals=4)
+plot_grid_heatmap(df=param_df, value_col="pct_mito", axes="fold", title="Percentage Mitochondrial Genes")
+
+
+plot_grid_heatmap(df=param_df, value_col="median_zero_frac", axes="fold", title="median_zero_frac", decimals=4)
+plot_grid_heatmap(df=param_df, value_col="median_gene_detect_frac", axes="fold", title="median_gene_detect_frac", decimals=4)
+plot_grid_heatmap(df=param_df, value_col="frac_counts_top50", axes="fold", title="frac_counts_top50", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="mean_vs_zero_cor", axes="fold", title="mean_vs_zero_cor", decimals=4)
+
+plot_grid_heatmap(df=param_df, value_col="ave_lib_size", axes="fold", title="Average Library Size per Cell", decimals=0)
+plot_grid_heatmap(df=param_df, value_col="med_lib_size", axes="fold", title="Median Library Size per Cell", decimals=0)
+
+```
+
+# Visualise MAIT enrichment metrics
+```{r}
+
+plot_grid_heatmap(df=param_df, value_col="recall_at_Kexp", axes="fold", title="recall_at_Kexp value", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="precision_at_Kexp", axes="fold", title="precision_at_Kexp value", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="f1_at_Kexp", axes="fold", title="f1_at_Kexp value", decimals=3)
+
+
+plot_grid_heatmap(df=param_df, value_col="recall_at_1pct", axes="fold", title="recall_at_1pct value", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="precision_at_1pct", axes="fold", title="precision_at_1pct value", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="f1_at_1pct", axes="fold", title="f1_at_1pct value", decimals=3)
+plot_grid_heatmap(df=param_df, value_col="enrich_at_1pct", axes="fold", title="enrich_at_1pct value", decimals=1)
+
+```
+
+## Figure 6a,b
+```{r}
+fig6a <- plot_grid_heatmap(df=param_df, value_col="mait_value", axes="fold", title="MAIT cell gene signature score", decimals=3)+
+  ggtitle(expression(bold("MAIT cell gene signature score"))) +
+  guides(fill = guide_colorbar(title = NULL)) +
+  theme(plot.title = element_text(hjust=0.5))
+fig6a
+suppressMessages(ggsave("data/plots/part2/Figure 6a.png", plot=fig6a, dpi=600, bg="white"))
+
+fig6b <- plot_grid_heatmap(df=param_df, value_col="enrich_at_Kexp", axes="fold", title="Enrichment@K value", decimals=1)+
+  ggtitle(expression(bold("Enrichment@K value"))) +
+  guides(fill = guide_colorbar(title = NULL)) +
+  theme(plot.title = element_text(hjust=0.5))
+fig6b
+suppressMessages(ggsave("data/plots/part2/Figure 6b.png", plot=fig6b, dpi=600, bg="white"))
+```

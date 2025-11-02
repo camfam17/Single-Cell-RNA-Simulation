@@ -1,0 +1,505 @@
+---
+title: "Part 3"
+output: html_document
+---
+
+
+```{r include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(readr)
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(UCell)
+  library(msigdbr)
+  library(patchwork)
+  library(VennDiagram)
+  library(tibble)
+  library(ggrepel)
+})
+
+output.folder <- "~/TidyFolder/data/part3/"
+
+```
+
+# 1) Functional immune signatues
+## Load data
+```{r}
+
+realset <- readRDS("~/MAITSim/COVIDatlas_MAIT_labelled.seu.rds")
+realset <- subset(realset, subset = SLC4A10 > 0.5)
+realset <- ScaleData(realset) %>% RunPCA() %>% RunUMAP(dims = 1:20) %>% FindNeighbors(dims = 1:20) %>% FindClusters(resolution = 0.4, verbose=FALSE)
+Idents(realset) <- "seurat_clusters"
+
+
+testset1 <- readRDS(paste(output.folder, "sim_Status_All_1.50xcell_1.00xdepth.rds", sep=""))
+testset1 <- as(testset1, "dgCMatrix")
+celltypes = colnames(testset1)
+colnames(testset1) <- make.unique(colnames(testset1), sep = "_")
+testset1 <- CreateSeuratObject(counts=testset1, assay="RNA")
+testset1 <- AddMetaData(testset1, metadata = celltypes, col.name = "cell.type")
+testset1 <- NormalizeData(testset1)
+testset1 <- FindVariableFeatures(testset1)
+testset1 <- subset(testset1, subset =   SLC4A10 > 0.5)
+testset1 <- ScaleData(testset1) %>% RunPCA() %>% RunUMAP(dims = 1:20) %>% FindNeighbors(dims = 1:20) %>% FindClusters(resolution = 0.4, verbose=FALSE)
+Idents(testset1) <- "seurat_clusters"
+
+
+testset2 <- readRDS(paste(output.folder, "sim_Status_All_1.50xcell_2.00xdepth.rds", sep=""))
+testset2 <- as(testset2, "dgCMatrix")
+celltypes = colnames(testset2)
+colnames(testset2) <- make.unique(colnames(testset2), sep = "_")
+testset2 <- CreateSeuratObject(counts=testset2, assay="RNA")
+testset2 <- AddMetaData(testset2, metadata = celltypes, col.name = "cell.type")
+testset2 <- NormalizeData(testset2)
+testset2 <- FindVariableFeatures(testset2)
+testset2 <- subset(testset2, subset =   SLC4A10 > 0.5)
+testset2 <- ScaleData(testset2) %>% RunPCA() %>% RunUMAP(dims = 1:20) %>% FindNeighbors(dims = 1:20) %>% FindClusters(resolution = 0.4, verbose=FALSE)
+Idents(testset2) <- "seurat_clusters"
+
+```
+
+## Functional signatures
+```{r fig.width=6, fig.height=9, dpi=150, out.width="100%"}
+# https://www.frontiersin.org/journals/immunology/articles/10.3389/fimmu.2021.651656/full
+
+regmet_genes    <- c("IL7R","CCL4","HLA-DRA","HLA-DRB1","CCR7","TCF7")
+
+ifn_response <- c("ADAR", "APOBEC3", "BST2", "CD74", "MB21D1", "DDIT4", "DDX58", "DDX60", "EIF2AK2", "GBP1", "GBP2", "HPSE", "IFI44L", "IFI6", "IFIH1", "IFIT1", "IRF1", "IRF7", "ISG15", "ISG20", "MAP3K14", "MOV10", "MS4A4A", "MX1", "MX2", "NAMPT", "NT5C3", "OAS1", "OAS2", "OAS3", "OASL", "P2RY6", "PHF15", "PML", "RSAD2", "RTP4", "SLC15A3", "SLC25A28", "SSBP3", "TREX1", "TRIM5", "TRIM25", "SUN2", "ZC3HAV1", "IFITM1", "IFITM2",  "IFITM3")
+
+cytotoxic_genes <- c("PRF1", "IFNG", "GNLY", "NKG7", "GZMB", "GZMA", "GZMH", "KLRK1", "KLRB1", "KLRD1", "CTSW", "CST7")
+
+exhaustion <- c("LAG3", "TIGIT", "PDCD1", "CTLA4", "HAVCR2", "TOX")
+
+s100_genes <- c("S100A1", "S100A2", "S100A3", "S100A4", "S100A5", "S100A6", "S100A7", "S100A7A", "S100A7L2", "S100A7P1", "S100A7P2", "S100A8", "S100A9", "S100A10", "S100A11", "S100A12", "S100A13", "S100A14", "S100A15A", "S100A16", "S100B", "S100G", "S100P", "S100Z")
+
+
+m_df_c2 <- msigdbr(species = "Homo sapiens", category = "C2")
+m_df_kegg <- m_df_c2 %>% filter(grepl("KEGG", gs_name))
+
+# KEGG hsa04210 (Apoptosis) -> name "KEGG_APOPTOSIS"
+apoptosis_genes <- m_df_kegg %>%
+  filter(gs_name == "KEGG_APOPTOSIS") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+
+feature_list <- list(
+  Cytotoxicity = cytotoxic_genes,
+  RegulatoryMetabolism = regmet_genes,
+  S100      = s100_genes,
+  IFN       = ifn_response,
+  exhaust   = exhaustion,
+  apoptosis = apoptosis_genes)
+
+```
+
+## Plots
+### Figure 7a
+```{r fig.width=4, fig.height=10}
+
+realset <- AddModuleScore_UCell(realset, features = feature_list, name="")
+
+plots <- FeaturePlot(realset, features = names(feature_list), min.cutoff = "q10", combine = FALSE)
+plots <- lapply(plots, function(p) {
+  p + labs(x = "UMAP 1", y = "UMAP 2") +theme(plot.title = element_text(size = 10, face = "bold"))
+})
+fig7a <- wrap_plots(plots, ncol = 1) +
+      plot_annotation(title = "Real dataset",
+                      theme = theme(plot.title = element_text(size = 20, 
+                                                              face = "bold", 
+                                                              hjust = 0.5)))
+
+fig7a
+suppressMessages(ggsave("data/plots/part3/Figure 7a.png", plot=fig7a, dpi=600))
+
+# vp <- VlnPlot(realset, features = paste0(names(feature_list), "_UCell"), group.by = "seurat_clusters")
+# (vp + plot_annotation(title = "UCell Scores by Cluster (Real dataset)"))&
+#   theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5))
+
+```
+
+### Figure 7b
+```{r fig.width=4, fig.height=10}
+
+testset1 <- AddModuleScore_UCell(testset1, features = feature_list, name="")
+
+plots <- FeaturePlot(testset1, features = names(feature_list), min.cutoff = "q10", combine = FALSE)
+plots <- lapply(plots, function(p) {
+  p + labs(x = "UMAP 1", y = "UMAP 2") + theme(plot.title = element_text(size = 10, face = "bold"))
+})
+fig7b <- wrap_plots(plots, ncol = 1) +
+      plot_annotation(title = "Simulated dataset 1",
+                      theme = theme(plot.title = element_text(size = 20, 
+                                                              face = "bold", 
+                                                              hjust = 0.5)))
+
+fig7b
+suppressMessages(ggsave("data/plots/part3/Figure 7b.png", plot=fig7b, dpi=600))
+
+
+# vp <- VlnPlot(testset1, features = paste0(names(feature_list), "_UCell"), group.by = "seurat_clusters")
+# (vp + plot_annotation(title = "UCell Feature Scores (Simulated dataset 1.5xcells, 1xdepth)"))&
+#   theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5))
+
+```
+
+### Figure 7c
+```{r fig.width=4, fig.height=10}
+
+testset2 <- AddModuleScore_UCell(testset2, features = feature_list, name="")
+
+plots <- FeaturePlot(testset2, features = names(feature_list), min.cutoff = "q10", combine = FALSE)
+plots <- lapply(plots, function(p) {
+  p + labs(x = "UMAP 1", y = "UMAP 2") + theme(plot.title = element_text(size = 10, face = "bold"))
+})
+fig7c <- wrap_plots(plots, ncol = 1) +
+      plot_annotation(title = "Simulated dataset 2",
+                      theme = theme(plot.title = element_text(size = 20, 
+                                                              face = "bold", 
+                                                              hjust = 0.5)))
+fig7c
+suppressMessages(ggsave("data/plots/part3/Figure 7c.png", plot=fig7c, dpi=600))
+
+# vp <- VlnPlot(testset2, features = paste0(names(feature_list), "_UCell"), group.by = "seurat_clusters")
+# (vp + plot_annotation(title = "UCell Feature Scores (Simulated dataset 1.5xcells, 2xdepth)"))&
+#   theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5))
+
+```
+
+# 2) DEG list and GO Enrichment
+## Load data
+```{r}
+
+icu1 <- readRDS(paste(output.folder, "sim_Admission_ICU_1.5cell_1depth.rds", sep=""))
+colnames(icu1) <- make.unique(colnames(icu1), sep = "_")
+icu1 <- CreateSeuratObject(counts=icu1, assay="RNA")
+icu1$Admission <- "ICU"
+
+uninf1 <- readRDS(paste(output.folder, "sim_Admission_Uninfected_1.5cell_1depth.rds", sep=""))
+colnames(uninf1) <- make.unique(colnames(uninf1), sep = "_")
+uninf1 <- CreateSeuratObject(counts=uninf1, assay="RNA")
+uninf1$Admission <- "N/A"
+
+testset1 <- merge(icu1, y = uninf1, add.cell.ids = c("NA","ICU"))
+DefaultAssay(testset1) <- "RNA"
+testset1[["RNA"]] <- JoinLayers(testset1[["RNA"]])
+testset1 <- NormalizeData(testset1)
+testset1 <- FindVariableFeatures(testset1)
+testset1 <- subset(testset1, subset =   SLC4A10 > 0.5)
+testset1 <- ScaleData(testset1)
+
+
+
+icu2 <- readRDS(paste(output.folder, "sim_Admission_ICU_1.5cell_2depth.rds", sep=""))
+colnames(icu2) <- make.unique(colnames(icu2), sep = "_")
+icu2 <- CreateSeuratObject(counts=icu2, assay="RNA")
+icu2$Admission <- "ICU"
+
+uninf2 <- readRDS(paste(output.folder, "sim_Admission_Uninfected_1.5cell_2depth.rds", sep=""))
+colnames(uninf2) <- make.unique(colnames(uninf2), sep = "_")
+uninf2 <- CreateSeuratObject(counts=uninf2, assay="RNA")
+uninf2$Admission <- "N/A"
+
+testset2 <- merge(icu2, y = uninf2, add.cell.ids = c("NA","ICU"))
+DefaultAssay(testset2) <- "RNA"
+testset2[["RNA"]] <- JoinLayers(testset2[["RNA"]])
+testset2 <- NormalizeData(testset2)
+testset2 <- FindVariableFeatures(testset2)
+testset2 <- subset(testset2, subset =   SLC4A10 > 0.5)
+testset2 <- ScaleData(testset2)
+
+```
+
+
+## Venn diagram
+```{r}
+
+run_deg_go <- function(obj, group_col = "Admission", ident1 = "N/A", ident2 = "ICU", do_GO = FALSE){
+  
+  # DEG with MAST
+  Idents(obj) <- group_col
+  de_pair <- FindMarkers(obj, ident.1  = ident1, ident.2  = ident2, test.use = "MAST")
+
+  # DEG thresholds
+  PADJ_THRES        <- 0.01
+  UP_LOGFC_THRES    <- 0.25
+
+  de_tbl <- de_pair %>% tibble::rownames_to_column("gene")
+
+  lfc_col <- if ("avg_log2FC" %in% colnames(de_tbl)) "avg_log2FC" else "avg_logFC" # either Seurat's avg_logFC (ln) or avg_log2FC (log2)
+
+  up_genes <- de_tbl %>%
+    dplyr::filter(.data[[lfc_col]] >  UP_LOGFC_THRES, p_val_adj < PADJ_THRES) %>%
+    dplyr::pull(gene) %>%
+    unique()
+
+  
+  if(do_GO){
+      
+    # GO thresholds
+    GO_PVALUE_CUTOFF <- 0.05
+    GO_QVALUE_CUTOFF <- 0.20
+    
+    ego_up <- enrichGO(
+      gene          = up_genes,
+      OrgDb         = org.Hs.eg.db,
+      keyType       = "SYMBOL",
+      ont           = "BP",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = GO_PVALUE_CUTOFF,
+      qvalueCutoff  = GO_QVALUE_CUTOFF)
+  
+
+    df_up <- as.data.frame(ego_up)
+    df_up <- df_up[order(df_up$p.adjust), ]
+    top10 <- head(df_up, 10)
+  
+    ggplot(top10, aes(x = reorder(Description, -p.adjust), y = -log10(p.adjust))) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      coord_flip() +
+      labs(x = "GO term", y = "-log10(adj. p-value)",
+           title = paste0("Top 10 Enriched GO Terms (Upregulated Genes): ", 
+           ident1, " vs ", ident2)) +
+      theme_minimal()
+    
+    return(list(up_genes = up_genes, ego_up = ego_up))
+  }
+  
+  return(list(up_genes = up_genes))
+}
+
+res1 <- run_deg_go(realset, group_col = "Admission", ident1 = "N/A", ident2 = "ICU")
+res2 <- run_deg_go(testset1, group_col = "Admission", ident1 = "N/A", ident2 = "ICU")
+res3 <- run_deg_go(testset2, group_col = "Admission", ident1 = "N/A", ident2 = "ICU")
+
+vd <- venn.diagram(list(RealSet = res1$up_genes, SimulationSet1 = res2$up_genes, SimulationSet2 = res3$up_genes),
+                   filename = NULL)
+grid.newpage(); grid.draw(vd)
+
+```
+
+## Volcano plot
+```{r}
+
+get_de <- function(obj, group_col = "Admission", ident1 = "N/A", ident2 = "ICU", test.use = "MAST"){
+  Idents(obj) <- group_col
+  FindMarkers(obj, ident.1 = ident1, ident.2 = ident2, test.use = test.use)
+}
+
+de_real  <- get_de(realset,  "Admission", "N/A", "ICU")
+de_test1 <- get_de(testset1, "Admission", "N/A", "ICU")
+de_test2 <- get_de(testset2, "Admission", "N/A", "ICU")
+
+```
+
+### Figure 8a,b,c
+```{r}
+
+plot_volcano_from_de <- function(de_tbl, 
+                                 padj_cut = 0.05, lfc_cut  = 0.25, 
+                                 label_top = 10, title_main = NULL,
+                                 ident1 = "N/A", ident2 = "ICU"){
+
+  res <- de_tbl %>% tibble::rownames_to_column("gene")
+
+  if ("avg_log2FC" %in% colnames(res)) {
+    res <- res %>% mutate(lfc2 = avg_log2FC)
+  } else if ("avg_logFC" %in% colnames(res)) {
+    res <- res %>% mutate(lfc2 = avg_logFC / log(2))
+  } else {
+    stop("No fold-change column found (expected avg_log2FC or avg_logFC).")
+  }
+
+  res <- res %>% mutate(log10padj = -log10(p_val_adj + 1e-300),
+                 sig = p_val_adj < padj_cut & abs(lfc2) >= lfc_cut)
+
+  ttl <- if (is.null(title_main)) paste0(ident1, " vs ", ident2) else title_main
+
+  top_up <- res %>% filter(sig, lfc2 > 0) %>% arrange(p_val_adj) %>% slice_head(n = label_top)
+  top_dn <- res %>% filter(sig, lfc2 < 0) %>% arrange(p_val_adj) %>% slice_head(n = label_top)
+
+  p <- ggplot(res, aes(lfc2, log10padj)) +
+    geom_point(aes(alpha = sig), size=1) +
+    ggrepel::geom_text_repel(
+      data = dplyr::bind_rows(top_up, top_dn),
+      aes(label = gene),
+      max.overlaps = 50, size = 3) +
+    geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = 2) +
+    geom_hline(yintercept = -log10(padj_cut), linetype = 2) +
+    labs(x = "log2FC", y = "-log10 adj p", title = ttl) +
+    xlim(-10, 5) +
+    theme_classic() +
+    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), aspect.ratio = 2/1.7)
+
+  return(p)
+}
+
+fig8a <- plot_volcano_from_de(de_real,  title_main = "Real dataset")
+fig8b <- plot_volcano_from_de(de_test1, title_main = "Simulated dataset 1")
+fig8c <- plot_volcano_from_de(de_test2, title_main = "Simulated dataset 2")
+
+fig8a
+fig8b
+fig8c
+
+suppressMessages(ggsave("data/plots/part3/Figure 8a.png", plot=fig8a, dpi=600))
+suppressMessages(ggsave("data/plots/part3/Figure 8b.png", plot=fig8b, dpi=600))
+suppressMessages(ggsave("data/plots/part3/Figure 8c.png", plot=fig8c, dpi=600))
+```
+
+
+# 3) Gene panel
+## Load files
+```{r}
+
+# The Donor.full IDs of healthy and ICU patients
+files <- c("C1 A", "C1 B", "C2", "C3", "C4", "C5", "C6", "H1", "H2", "H3", "H4", "H5", "H6")
+
+build_merged_seurat <- function(files, depth_tag = "1depth"){
+  objs <- list()
+
+  ## load files and build Seurat objects
+  for (i in seq_along(files)) {
+    fpath <- paste(output.folder, "sim_", "Donor.full", "_", files[i], "_", "1.5cell_", depth_tag, ".rds", sep = "")
+    mat <- readRDS(fpath)
+    
+    celltypes = colnames(mat)
+    colnames(mat) <- make.unique(colnames(mat), sep = "_")
+    
+    seu <- CreateSeuratObject(counts = mat, assay="RNA")
+    seu <- AddMetaData(seu, metadata = celltypes, col.name = "cell.type")
+    
+    seu$Donor.full <- files[i]
+    if (substr(files[i], 1, 1) == "C") {
+      seu$Admission <- "ICU"
+    } else {
+      seu$Admission <- "N/A"
+    }
+    objs[[i]] <- seu
+  }
+
+  # merge all
+  seu_merged <- merge(x = objs[[1]], y = objs[-1], add.cell.ids = files)
+
+  # Seurat v5 “layers” fix
+  DefaultAssay(seu_merged) <- "RNA"
+  if (inherits(seu_merged[["RNA"]], "Assay5")) {
+    seu_merged[["RNA"]] <- JoinLayers(seu_merged[["RNA"]])
+  }
+
+  # prep data
+  seu_merged <- NormalizeData(seu_merged)
+  seu_merged <- FindVariableFeatures(seu_merged)
+  seu_merged <- subset(seu_merged, subset = SLC4A10 > 0.5)
+  seu_merged <- ScaleData(seu_merged)
+
+  return(seu_merged)
+}
+
+f1seu <- build_merged_seurat(files, depth_tag = "1depth")
+f2seu <- build_merged_seurat(files, depth_tag = "2depth")
+
+```
+
+## Plots
+```{r}
+
+plot_gene_panel <- function(
+  seurat_obj, genes, group_col,
+  ident1, ident2, ctype_col, target_ct,
+  sample_col, facet_ncol = 3,
+  main_title = NULL) {
+  
+  vars_to_fetch <- c(genes, group_col, ctype_col, sample_col)
+
+  long <- FetchData(seurat_obj, vars = vars_to_fetch) %>%
+          tibble::as_tibble() %>%
+          dplyr::filter(.data[[ctype_col]] == target_ct, .data[[group_col]] %in% c(ident1, ident2)) %>%
+          tidyr::pivot_longer(cols = tidyselect::all_of(genes), names_to = "gene", values_to = "expr")
+
+  long[[group_col]] <- factor(long[[group_col]], levels = c(ident1, ident2))
+  
+  long[[group_col]] <- factor(long[[group_col]], levels = c(ident1, ident2), labels = c("HC", "Severe"))
+  
+  df <- long %>%
+        dplyr::group_by(.data[[sample_col]], .data[[group_col]], gene) %>%
+        dplyr::summarise(mean_expr = mean(expr, na.rm = TRUE), .groups = "drop")
+
+  summary_df <- df %>%
+                dplyr::group_by(.data[[group_col]], gene) %>%
+                dplyr::summarise(
+                  group_mean = mean(mean_expr, na.rm = TRUE),
+                  sem = stats::sd(mean_expr, na.rm = TRUE) / sqrt(dplyr::n()),
+                  .groups = "drop")
+  
+  p <- ggplot2::ggplot() +
+       ggplot2::geom_jitter(
+         data = df,
+         ggplot2::aes(x = .data[[group_col]], y = mean_expr),
+         width = 0.15, size = 2, alpha = 0.9) +
+       ggplot2::geom_errorbar(
+         data = summary_df,
+         ggplot2::aes(x = .data[[group_col]], ymin = group_mean - sem, ymax = group_mean + sem),
+         width = 0.1, color = "black") +
+       ggplot2::geom_point(
+         data = summary_df,
+         ggplot2::aes(x = .data[[group_col]], y = group_mean),
+         size = 3, shape = 18, color = "black") +
+       ggplot2::facet_wrap(~ gene, scales = "free_y", ncol = facet_ncol) +
+       ggplot2::theme_classic(base_size = 13) +
+       ggplot2::xlab("") + ggplot2::ylab("Expression (mean ± SEM)") +
+       ggplot2::theme(legend.position = "none") +
+       ggplot2::ggtitle(main_title) 
+
+  p <- p + theme(
+  text = element_text(face = "bold"),
+  axis.title = element_text(face = "bold"),
+  axis.text  = element_text(face = "bold"),
+  strip.text = element_text(face = "bold"),
+  plot.title = element_text(face = "bold", hjust = 0.5))
+  
+  return(p)
+}
+
+```
+
+### Figure 9a,b,c
+```{r}
+
+genes = c("IFITM1","IFITM3","S100A8","RORC","DUSP2","JUND")
+
+fig9a <- plot_gene_panel(realset,
+                         genes = genes, group_col = "Admission", ident1 = "N/A", ident2 = "ICU",
+                         ctype_col = "cell.type.coarse", target_ct = "MAIT", 
+                         sample_col = "Donor.full", main_title = "Real dataset")
+
+fig9b <- plot_gene_panel(f1seu,
+                        genes = genes, group_col = "Admission", ident1 = "N/A", ident2 = "ICU",
+                         ctype_col = "cell.type", target_ct = "MAIT", 
+                         sample_col = "Donor.full", main_title = "Simulated set 1") #  (1.5x cell, 1x depth)
+
+fig9c <- plot_gene_panel(f2seu,
+                         genes = genes, group_col = "Admission", ident1 = "N/A", ident2 = "ICU",
+                         ctype_col = "cell.type", target_ct = "MAIT", 
+                         sample_col = "Donor.full", main_title = "Simulated dataset 2") # (1.5x cell, 2x depth)
+
+
+fig9a
+fig9b
+fig9c
+
+suppressMessages(ggsave("data/plots/part3/Figure 9a.png", plot=fig9a, dpi=600))
+suppressMessages(ggsave("data/plots/part3/Figure 9b.png", plot=fig9b, dpi=600))
+suppressMessages(ggsave("data/plots/part3/Figure 9c.png", plot=fig9c, dpi=600))
+
+```
+
