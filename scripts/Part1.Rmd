@@ -1,0 +1,595 @@
+---
+title: "Part 1"
+output: html_document
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+# Load libraries
+```{r}
+
+suppressPackageStartupMessages({
+  library(scDesign2)
+  library(Matrix)
+  library(Matrix.utils)
+  library(Seurat)
+  library(plyr)
+  library(dplyr)
+  library(Seurat)
+  library(sctransform)
+  library(igraph)
+  library(factoextra)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(EpicTools)
+  require(Hmisc)
+  require(dplyr)
+  require(openxlsx)
+  require(ggplot2)
+  library(ggpubr)
+  require(cowplot)
+  library(data.table)
+  library(RColorBrewer)
+  library(rowr)
+  library(SingleR)
+  library(scater)
+  library(pheatmap)
+  library(nichenetr)
+  library(tidyverse)
+  library(SimBench)
+  library(parallel)
+  library(DESeq2)
+  library(UCell)
+  library(flexclust)
+  library(mclust)
+  library(ggrepel)
+})
+  
+set.seed(1)
+RNGkind("L'Ecuyer-CMRG")   # good practice for parallel RNG
+```
+
+
+# Specify analysis parameters and gene signature of rare cell type
+ - Option to subset dataset using a target value in a specific meta.data column
+ - We will be using the whole dataset, but you could focus on only ICU patients, or specific donors for example
+ - Core gene signature of MAIT cells used from https://www.nature.com/articles/s41590-023-01575-1 
+```{r}
+
+# Subset: i.e. Donor = H1, Status = Healthy
+target <- "All" # COVID Healthy
+column <- "Status"
+# target <- "H1" # H1 C2
+# column <- "Donor"
+label_granularity <- "fine" # coarse # fine
+gene_filter <- 0.00
+zp.cutoff <- 0.8
+
+genes.signature <- c("KLRB1", "IL7R", "LTB", "CEBPD", "FOS", "AQP3", "SLC4A10", "DUSP1", "CCR6", "ZBTB16", "NCR3", "TEX14", "JUN", "AC245014.3", "NFKBIA", "IL4I1", "CD69", "PHACTR2", "ERN1", "NFKBIZ", "TNFAIP3", "RORA", "SPOCK2", "TMIGD2", "TLE1", "ALOX5AP", "FOSB", "RPLP0", "NOSIP", "JAML", "CTSA", "LST1", "DPP4", "GPR65", "LINC00910", "CROCC", "SATB1", "MYC", "LTK", "AC020916.1", "IL18RAP", "MPZL3", "SNX9", "TOB1", "TTC39C", "ZFP36L1", "FLT3LG", "RUNX2", "INTS6", "CAMK4", "BACH2", "LINC01644", "SLC7A5", "PDE4D", "ODF2L", "ATF7IP2", "PIM2", "GPR183", "BLK", "PLCB1", "PABPC1", "TNFRSF25", "COLQ", "PPP1R15A", "RPLP1", "LGALS3", "DUSP16", "RCAN3", "BTG1", "GTF3C1", "IL23R", "CERK", "MAP3K4", "KDM6B", "CXCR6", "RORC", "AC022217.3", "TC2N", "FKBP11", "CD28", "EEF1G", "PRR5", "GPRIN3", "PER1", "ZC3H12A", "ADAM12", "RPS13", "PBXIP1", "PIM1", "ME1", "RORA-AS1", "SERP1", "HPGD", "DUSP2", "LINC01871", "GYG1", "CD40LG", "TPT1", "MYBL1", "CDC14A")
+
+```
+
+
+# Load and subset single cell data
+- Specify output folder
+- Load data and subset according to parameters above
+```{r}
+
+output.folder = "~/TidyFolder/data/part1/"
+
+scdata <- readRDS("~/MAITSim/COVIDatlas_MAIT_labelled.seu.rds")
+
+if(tolower(target) != 'all'){
+  keep_cells <- scdata@meta.data[[column]] == target
+  scdata <- subset(scdata, cells = colnames(scdata)[keep_cells])
+}
+
+```
+
+# Prep data for simulator
+```{r}
+
+# Extract count matrix from Seurat object
+rawcounts <- GetAssayData(scdata, assay = "RNA", slot = "counts", verbose=FALSE)
+
+# Label count matrix with cell type (scDesign2 requirement)
+labels <- scdata@meta.data[colnames(rawcounts), paste("cell.type", label_granularity, sep=".")]
+colnames(rawcounts) <- labels
+
+# Remove genes that are expressed in less than gene_filter% of cells
+keep <- Matrix::rowSums(rawcounts > 0) >= gene_filter * ncol(rawcounts)  
+rawcounts <- rawcounts[keep, , drop=FALSE]
+
+saveRDS(rawcounts, file=paste(output.folder, "1to1raw_", column, "_", target, ".rds", sep=""))
+
+```
+
+# Fit model
+- Expect this to take many hours. 
+- Better to create in non-interactive script and load from disk in this notebook
+```{r}
+
+fit.filename <- paste(output.folder, "1to1fit_", column, "_", target, ".rds", sep="")
+
+if (file.exists(fit.filename)){
+  fit <- readRDS(fit.filename)
+}else{
+
+  print("fitting model")
+  fit <- fit_model_scDesign2(data_mat = rawcounts,
+                             cell_type_sel = sort(unique(colnames(rawcounts))),
+                             sim_method = "copula",
+                             marginal = "auto_choose",
+                             zp_cutoff = 0.8,
+                             ncores = min(9, length(unique(colnames(rawcounts))))
+  )
+  print("Model fitted")
+  saveRDS(fit, file=fit.filename)
+}
+
+```
+
+
+# Simulate data from model
+- This does not take too long (10-30 minutes), but can also be created script and loaded
+```{r}
+
+sim.filename <- paste(output.folder, "1to1sim_", column, "_", target, ".rds", sep="")
+
+if (file.exists(sim.filename)){
+  simcount <- readRDS(sim.filename)
+}else{
+  print("Simulating data")
+  simcount <- simulate_count_scDesign2(
+    model_params   = fit,
+    n_cell_new     = ncol(rawcounts), # match input ncells
+    cell_type_prop = prop.table(table(colnames(rawcounts))), # match input cell proportions
+    total_count_new = NULL, 
+    sim_method     = "copula",
+    reseq_method   = "mean_scale",
+    cell_sample    = FALSE
+  )
+  rownames(simcount) <- rownames(rawcounts)
+  simcount <- Matrix(simcount, sparse = TRUE)
+  saveRDS(simcount, file=sim.filename)
+  print("Simulation saved")
+}
+
+```
+
+# Qualitative Checks
+- Confirm library sizes and sparsity roughly match real data before proceeding
+```{r}
+
+matrix_properties <- function(countmat, mat_type){
+  
+  print(mat_type)
+  
+  dimensions <- dim(countmat)
+  size <- length(countmat)
+  depth <- sum(countmat)
+  proportion_of_zeros <- sum(countmat == 0) / length(countmat)
+  
+  cat("Dimensions: ", dimensions, "(size: ", size, ")\n")
+  cat("Depth: ", depth, "\n")
+  cat("proportion of zeros", proportion_of_zeros, "\n")
+  
+  
+  # Histograms of library sizes
+  colSums(countmat) |> hist(50, main=paste(mat_type, "lib sizes"))
+  hist(log10(Matrix::colSums(countmat) + 1), breaks = 50, main = paste(mat_type, "log lib size"), xlab = "log10(UMIs)")
+  
+  # Sparsity barcode
+  image(countmat[1000:1800, 1:1500], main = paste("Sparsity barcode (", mat_type, ")")) 
+  
+}
+
+matrix_properties(rawcounts, "Real data")
+cat("\n")
+matrix_properties(simcount, "Simulated data")
+
+```
+
+
+# Prep data for further analyses
+```{r}
+# Wrap count matrices in Seurat and SingleCellExperiment objects for further analyses
+
+raw.celltypes <- colnames(rawcounts)
+colnames(rawcounts) <- make.unique(raw.celltypes, sep = "_cell")
+rawcounts.sce <- SingleCellExperiment(assays = list(counts = rawcounts))
+colData(rawcounts.sce)$celltype <- factor(raw.celltypes)
+rawcounts.seu <- CreateSeuratObject(counts = rawcounts, project = "Real", min.cells = 0, min.features = 0)
+rawcounts.seu$source <- "Real"
+rawcounts.seu$cell.type <- raw.celltypes
+rawcounts.seu <- NormalizeData(rawcounts.seu, verbose = FALSE)
+VariableFeatures(rawcounts.seu) <- rownames(rawcounts.seu)
+rawcounts.seu <- ScaleData(rawcounts.seu, verbose = FALSE)
+rawcounts.seu <- RunPCA(rawcounts.seu, npcs = 30, verbose = FALSE)
+rawcounts.seu <- RunUMAP(rawcounts.seu, dims = 1:30, verbose = FALSE)
+
+
+sim.celltypes <- colnames(simcount)
+colnames(simcount) <- make.unique(sim.celltypes, sep = "_cell")
+simcount.sce <- SingleCellExperiment(assays = list(counts = simcount))
+colData(simcount.sce)$celltype <- factor(sim.celltypes)
+simcount.seu  <- CreateSeuratObject(counts = simcount, project = "Sim", min.cells = 0, min.features = 0)
+simcount.seu$source <- "Simulated"
+simcount.seu$cell.type <- sim.celltypes
+simcount.seu <- NormalizeData(simcount.seu, verbose = FALSE)
+VariableFeatures(simcount.seu) <- rownames(simcount.seu)
+simcount.seu <- ScaleData(simcount.seu, verbose = FALSE)
+simcount.seu <- RunPCA(simcount.seu, npcs = 30, verbose = FALSE)
+simcount.seu <- RunUMAP(simcount.seu, dims = 1:30, verbose = FALSE)
+
+
+# combine real and simulated data
+combo <- merge(rawcounts.seu, simcount.seu)
+combo <- NormalizeData(combo, verbose = FALSE)
+combo <- FindVariableFeatures(combo, nfeatures = min(2000, nrow(combo)), verbose = FALSE)
+combo <- ScaleData(combo, verbose = FALSE)
+combo <- RunPCA(combo, npcs = 30, verbose = FALSE)
+combo <- RunUMAP(combo, dims = 1:30, verbose = FALSE)
+```
+
+
+## Cell type proportions
+- Barplot showing proportions of cell types in real and simulated datasets
+- They match exactly because scDesign2 forces this
+```{r}
+
+celltype_barplot <- function(real_labels, sim_labels, main = "Cell-type frequency: Real vs Sim") {
+  real_tab <- table(real_labels)
+  sim_tab  <- table(sim_labels)
+
+  # align categories
+  all_types <- sort(unique(c(names(real_tab), names(sim_tab))))
+  real <- as.numeric(real_tab[all_types]); real[is.na(real)] <- 0
+  sim  <- as.numeric(sim_tab[all_types]);  sim[is.na(sim)]  <- 0
+
+  # proportions and order by Real (descending)
+  props <- rbind(real / sum(real), sim / sum(sim))
+  colnames(props) <- all_types
+  ord <- order(props[1, ], decreasing = TRUE)
+  props <- props[, ord, drop = FALSE]
+
+  # plot
+  props_plot <- props + 1e-6 
+  barplot(props_plot,
+        beside = TRUE, log = "y",
+        ylim = c(1e-6, 1), ylab = "Proportion (log)",
+        main = main, legend.text = c("Real","Sim"),
+        args.legend = list(x = "topright", bty = "n", inset = 0.01),
+        las = 2, cex.names = 0.7,
+        col = c("#184275", "#b3202c"))
+
+}
+
+real_types <- rawcounts.seu$cell.type
+sim_types  <- simcount.seu$cell.type
+
+celltype_barplot(real_types, sim_types, main = "Cell-type frequency: Real vs Sim")
+
+```
+
+
+
+
+## Overlap of cell distributions
+### Figure 1
+```{r fig.width=8}
+
+# UMAP coloured by source with clusters labelled
+emb <- Embeddings(combo, "umap")[, 1:2]
+df <- data.frame(UMAP_1 = emb[,1], UMAP_2 = emb[,2], celltype = combo@meta.data[, "cell.type"], row.names = colnames(combo))
+p <- DimPlot(combo, reduction = "umap", group.by = "source", cols = c("#2964ab", "#d1434f")) +
+             ggtitle("") +
+             theme(legend.position = "right", plot.margin = unit(c(1, 2, 1, 1), "cm"))
+
+centers <- aggregate(df[, c("UMAP_1","UMAP_2")], by = list(label = df$celltype), FUN = median)
+centers <- subset(centers, !label %in% c("IgA PB", "IgG PB"))   # remove these labels for visualisation purposes
+
+fig1 <- p + geom_text_repel(data = centers, aes(x = UMAP_1, y = UMAP_2, label = label), size = 4,
+            max.overlaps = Inf,
+            box.padding = 0.15,
+            point.padding = 0.5,
+            segment.color = NA
+          ) +
+          labs(x = "UMAP 1", y = "UMAP 2")
+
+fig1
+suppressMessages(ggsave("data/plots/part1/Figure 1.png", plot=fig1, dpi=600))
+
+```
+
+
+## Distribution of MAIT cells
+### Figure 2a.
+```{r message=FALSE, fig.width=8}
+
+raw.mait_cells <- WhichCells(rawcounts.seu, expression = cell.type == "MAIT")
+
+fig2a <- DimPlot(rawcounts.seu, reduction = "umap",
+                 group.by = "cell.type", label = TRUE, repel = TRUE,
+                 cells.highlight = list(MAIT = raw.mait_cells),
+                 cols.highlight = "#b3202c", cols = "grey") +
+                 ggtitle("Real") +
+                 labs(color = "Cell type", x = "UMAP 1", y = "UMAP 2") +
+                 scale_color_manual(values = c("grey", "#b3202c"), labels = c("Other", "MAIT")) +
+                 theme(plot.margin = unit(c(1, 1, 1, 1), "cm"))
+
+fig2a
+suppressMessages(ggsave("data/plots/part1/Figure 2a.png", plot=fig2a, dpi=600))
+
+```
+
+### Figure 2b.
+```{r message=FALSE, fig.width=8}
+
+sim.mait_cells <- WhichCells(simcount.seu, expression = cell.type == "MAIT")
+
+fig2b <- DimPlot(simcount.seu, reduction = "umap",
+                 group.by = "cell.type", label = TRUE, repel = TRUE,
+                 cells.highlight = list(MAIT = sim.mait_cells),
+                 cols.highlight = "#b3202c", cols = "grey") +
+                 ggtitle("Simulated") +
+                 labs(color = "Cell type", x = "UMAP 1", y = "UMAP 2") +
+                 scale_color_manual(values = c("grey", "#b3202c"), labels = c("Other", "MAIT")) +
+                 theme(plot.margin = unit(c(1, 1, 1, 1), "cm"))
+
+fig2b
+suppressMessages(ggsave("data/plots/part1/Figure 2b.png", plot=fig2b, dpi=600))
+
+```
+
+# eval_parameter
+### Figure 3. 
+```{r fig.width=8, fig.height=12, dpi=150, out.width="100%"}
+
+parameter_filename <- paste(output.folder, "1to1SimBenchParameter_", column, "_", target, ".rds", sep="")
+
+if(file.exists(parameter_filename)){
+  parameter_result <- readRDS(parameter_filename)
+}else{
+  parameter_result <- eval_parameter(real = rawcounts.sce, sim = simcount.sce, type = "raw" , method = "samplemethod")
+  saveRDS(parameter_result, file=parameter_filename)
+}
+
+distribution_celltype <- parameter_result$raw_value$`MAIT`$raw_value
+fig <- draw_parameter_plot(distribution_celltype) 
+ggarrange( plotlist =  fig , ncol = 3, nrow = 7, common.legend = T)
+
+```
+
+
+```{r fig.width=10, fig.height=5}
+
+title_map <- c(
+  mean = "Expression mean",
+  variance = "Expression variance",
+  featurecor = "Gene correlation",
+  effectivelibsize = "Effective library size",
+  fraczerocell = "Zeros per cell",
+  samplecor = "Cell correlation"
+)
+
+x_titles <- c(
+  "Expression mean" = "log2 cpm",
+  "Expression variance" = "log2 cpm",
+  "Gene correlation" = "spearman correlation",
+  "Effective library size" = "count (UMIs)",
+  "Zeros per cell" = "proportion",
+  "Cell correlation" = "spearman correlation"
+)
+
+selected_figs <- lapply(names(title_map), function(k) {
+  ttl <- title_map[[k]]
+  p <- fig[[k]] +
+    scale_fill_manual(name = "Dataset:      ",
+                      values = c(real = "#184275", samplemethod = "#b3202c"),
+                      labels = c(real = "Real", samplemethod = "Simulated")) +
+    guides(color = "none") +
+    labs(title = ttl) +
+    theme(plot.title = element_text(hjust = 0, face = "bold"),
+          axis.title.x = element_text(face = "bold"),
+          axis.title.y = element_text(face = "bold"),
+          legend.title = element_text(face = "bold"),
+          legend.text = element_text(face = "bold"))
+  if (ttl %in% names(x_titles)) p <- p + labs(x = x_titles[[ttl]])
+  p
+})
+names(selected_figs) <- unname(title_map)
+
+fig3 <- ggarrange(plotlist = selected_figs, ncol = 3, nrow = 2, common.legend = TRUE)#, legend = "bottom"
+fig3
+suppressMessages(ggsave("data/plots/part1/Figure 3.png", plot=fig3, dpi=600, bg="white"))
+
+```
+
+
+# MAIT cell ranking across fidelity metrics
+```{r}
+
+plot_stat_celltype <- function(x, metric, value_col = "kde_tstat", highlight_celltype = "MAIT") {
+  df <- x$stats_celltype[[metric]]
+  if (is.null(df)) stop("Metric not found in stats_celltype.")
+  if (!value_col %in% names(df)) stop("Column not found: ", value_col)
+  if (!"celltype" %in% names(df)) stop("'celltype' column missing.")
+
+  df$celltype <- as.character(df$celltype)
+  df$.hl <- if (is.null(highlight_celltype)) "other" else
+    ifelse(df$celltype == highlight_celltype, "highlight", "other")
+
+  # Compute rank (lower t-stat is better)
+  rk <- rank(df[[value_col]], ties.method = "average")
+  names(rk) <- df$celltype
+
+  # Print highlighted celltype's value and rank
+  if (!is.null(highlight_celltype) && highlight_celltype %in% df$celltype) {
+    val <- df[df$celltype == highlight_celltype, value_col][[1]]
+    cat(sprintf("[%s] %s: %s = %.6f | rank = %g / %d\n",
+                metric, highlight_celltype, value_col, val, rk[highlight_celltype], nrow(df)))
+  }
+
+  ggplot(df, aes(x = reorder(celltype, .data[[value_col]]), y = .data[[value_col]], fill = .hl)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = c(other = "grey80", highlight = "#b3202c"), guide = "none") +
+    labs(title = paste(metric, "-", value_col), x = "Cell type", y = value_col) +
+    theme_minimal(base_size = 12)
+}
+
+
+so <- parameter_result$stats_overall
+kde_overall <- vapply(so, function(d) as.numeric(d[[1]]), numeric(1))
+names(kde_overall) <- names(so)
+#kde_overall
+
+for (i in names(kde_overall)){
+  p <- plot_stat_celltype(parameter_result, i, "kde_tstat")
+  print(p)
+}
+
+```
+
+
+# How fidelity metrics change with cell type proportion
+```{r fig.width=13}
+
+plot_stat_vs_proportion <- function(x, metric, value_col = "kde_tstat", highlight_celltype = "MAIT") {
+  df <- x$stats_celltype[[metric]]
+  if (is.null(df)) stop("Metric not found in stats_celltype.")
+  req <- c(value_col, "proportion", "celltype")
+  if (!all(req %in% names(df))) stop("Missing required columns: ", paste(setdiff(req, names(df)), collapse = ", "))
+
+  df$celltype <- as.character(df$celltype)
+  df$.hl <- if (is.null(highlight_celltype)) "other" else
+    ifelse(df$celltype == highlight_celltype, "highlight", "other")
+
+  ggplot(df, aes(x = proportion, y = .data[[value_col]], color = .hl)) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c(other = "grey60", highlight = "#b3202c"), guide = "none") +
+    labs(title = paste(metric, "-", value_col, "vs proportion"),
+         x = "Proportion", y = value_col) +
+    theme_minimal(base_size = 12)
+}
+
+plots <- lapply(names(kde_overall), function(i){
+  plot_stat_vs_proportion(parameter_result, i, "kde_tstat")
+})
+library(patchwork)
+wrap_plots(plots)
+
+
+```
+
+
+```{r}
+
+for (i in names(parameter_result$stats_celltype)) {
+  df <- parameter_result$stats_celltype[[i]]
+  df <- df[order(df$kde_tstat, decreasing = TRUE), c("celltype", "kde_tstat")]
+}
+
+rank_df <- do.call(rbind, lapply(names(parameter_result$stats_celltype), function(metric) {
+  df <- parameter_result$stats_celltype[[metric]][, c("celltype", "kde_tstat")]
+  df$rank <- rank(df$kde_tstat, ties.method = "average")
+  df$metric <- metric
+  df
+}))
+
+total_rank <- aggregate(rank ~ celltype, data = rank_df, FUN = mean)
+total_rank <- total_rank[order(total_rank$rank), ]
+rownames(total_rank) <- NULL
+total_rank$index <- seq_len(nrow(total_rank))
+
+print("Average rank of cells across metrics")
+print(total_rank)
+
+```
+
+# eval_signal
+### Figure 4 
+```{r fig.width=9}
+
+signal_filename <- paste(output.folder, "1to1SimBenchSignal_", column, "_", target, ".rds", sep="")
+
+if(file.exists(signal_filename)){
+  signal_result <- readRDS(signal_filename)
+}else{
+  old <- getOption("Seurat.object.assay.version")
+  options(Seurat.object.assay.version = "v3")
+  on.exit(options(Seurat.object.assay.version = old), add = TRUE)
+  
+  signal_result <- eval_signal(real=rawcounts.sce, sim=simcount.sce)
+  saveRDS(signal_result, file=signal_filename)
+}
+
+smape_results <- signal_result %>%
+                 tidyr::pivot_wider(names_from = sim, values_from = prop) %>%
+                 mutate(smape_score = 1 - abs(real - sim) / ((abs(real) + abs(sim)) / 2))
+
+smape_results
+
+# fig4 <- draw_biosignal_plot(signal_result) + scale_fill_manual(values = c("#184275", "#b3202c"), labels = c("Real", "Simulated"))
+# fig4 <- fig4 + labs(x="Signal type", y="Proportion", fill="Dataset", title="Biological signal proportions")
+# fig4 <- fig4 + theme(plot.margin = unit(c(1, 2, 1, 1), "cm"))
+fig4 <- draw_biosignal_plot(signal_result) +
+  scale_fill_manual(
+    values = c("#184275", "#b3202c"),
+    labels = c("Real", "Simulated")
+  ) +
+  labs(
+    x = "Signal type",
+    y = "Proportion",
+    fill = "Dataset",
+    title = "Biological signal proportions"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title.x = element_text(face = "bold", margin = margin(t = 8)),
+    axis.title.y = element_text(face = "bold"),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "bold"),
+    plot.margin = unit(c(1, 2, 1, 1), "cm")
+  )
+
+
+fig4
+suppressMessages(ggsave("data/plots/part1/Figure 4.png", plot=fig4, dpi=600, bg="white"))
+
+```
+
+
+# UCell gene signature
+### Figure 5a & 5b
+```{r}
+
+# Run UCell scoring
+rawcounts.seu <- AddModuleScore_UCell(rawcounts.seu, features = list(signature = genes.signature))
+rawcounts.seu$cell.type <- dplyr::recode(rawcounts.seu$cell.type, "Activated Granulocyte" = "Granulocyte")
+
+simcount.seu <- AddModuleScore_UCell(simcount.seu, features = list(signature = genes.signature))
+simcount.seu$cell.type <- dplyr::recode(simcount.seu$cell.type, "Activated Granulocyte" = "Granulocyte")
+
+
+
+fig5a <- VlnPlot(rawcounts.seu, features = "signature_UCell", group.by = "cell.type", pt.size = 0) +
+         NoLegend() +
+         ggtitle("Real") +
+         labs(x = "Cell type", y = "MAIT signature score")
+fig5a
+suppressMessages(ggsave("data/plots/part1/Figure 5a.png", plot=fig5a, dpi=600))
+
+
+fig5b <- VlnPlot(simcount.seu, features = "signature_UCell", group.by = "cell.type", pt.size = 0) +
+         NoLegend() +
+         ggtitle("Simulated") +
+         labs(x = "Cell type", y = "MAIT signature score")
+fig5b
+suppressMessages(ggsave("data/plots/part1/Figure 5b.png", plot=fig5b, dpi=600))
+
+```
+

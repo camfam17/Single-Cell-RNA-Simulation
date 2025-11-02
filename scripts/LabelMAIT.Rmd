@@ -1,0 +1,141 @@
+---
+title: "LabelMAIT"
+output: html_document
+---
+
+```{r}
+library(scDesign2)
+library(Matrix)
+library(Matrix.utils)
+library(Seurat)
+library(plyr)
+library(dplyr)
+library(sctransform)
+library(igraph)
+library(factoextra)
+library(ComplexHeatmap)
+library(circlize)
+library(EpicTools)
+require(Hmisc)
+require(dplyr)
+require(openxlsx)
+require(ggplot2)
+library(ggpubr)
+require(cowplot)
+library(data.table)
+library(RColorBrewer)
+library(rowr)
+library(SingleR)
+library(scater)
+library(pheatmap)
+library(nichenetr)
+library(tidyverse)
+library(UCell)
+
+```
+
+
+# Load data and organise cell type annotations
+```{r}
+
+label_map1 <- c(
+  "RBC" = "RBC",
+  "B" = "B",
+  "PB" = "PB",
+  "CD14 Monocyte" = "Monocyte",
+  "CD16 Monocyte" = "Monocyte",
+  "CD8 T" = "T_all",
+  "CD4 T" = "T_all",
+  "gd T" = "T_all",
+  "Platelet" = "Platelet",
+  "NK" = "NK",
+  "Granulocyte" = "Granulocyte",
+  "DC" = "DC",
+  "pDC" = "DC"
+)
+
+coarsen_labels <- function(x) {
+  out <- unname(label_map1[x])     # vectorized lookup
+  out[is.na(out)] <- x[is.na(out)] # keep originals if not in map
+  out
+}
+
+print("Loading data")
+# pbmc = readRDS("~/RFolder2/downloaded.blish_covid.seu.rds")
+options(timeout = 600)   # 10 minutes
+pbmc <- readRDS(url("https://hosted-matrices-prod.s3-us-west-2.amazonaws.com/Single_cell_atlas_of_peripheral_immune_response_to_SARS_CoV_2_infection-25/blish_covid.seu.rds", "rb"))
+pbmc <- Seurat::UpdateSeuratObject(pbmc)
+
+
+print("Organising cell labels")
+# Rename and add coarsened labels
+# pbmc <- covid_combined.nc
+pbmc$cell.type <- NULL
+colnames(pbmc@meta.data)[colnames(pbmc@meta.data) == "cell.type.coarse"] <- "cell.type.medium"
+pbmc$cell.type.coarse <- coarsen_labels(pbmc$cell.type.medium)
+
+Idents(pbmc) <- "cell.type.medium"
+
+```
+
+```{r}
+
+DimPlot(pbmc, reduction = "umap") + #, group.by = "source"
+  ggtitle(paste("Cells Donor")) +
+  theme(legend.position = "right")
+
+
+```
+
+```{r}
+
+FeaturePlot(pbmc, features = "SLC4A10")
+```
+
+# Mark MAITs
+```{r}
+
+# # Call MAIT strictly by SLC4A10 > 0
+t_all_idx <- pbmc$cell.type.coarse == "T_all"
+expr <- GetAssayData(pbmc, assay = "RNA", slot = "data")
+pbmc$IsMAIT <- expr["SLC4A10", ] > 0
+table(pbmc$IsMAIT)  # sanity check
+
+
+# Quick visualization
+DimPlot(pbmc, group.by = "IsMAIT", pt.size = 0.2)
+FeaturePlot(pbmc, features = "SLC4A10", pt.size = 0.2)
+
+print(count(pbmc$IsMAIT))
+```
+
+# Transfer MAIT labels to all granularities
+```{r}
+
+granularities <- c("cell.type.fine", "cell.type.medium", "cell.type.coarse")
+for (gran in granularities) {
+  
+  x <- pbmc@meta.data[[gran]]
+  x[pbmc@meta.data$IsMAIT %in% TRUE] <- "MAIT"
+  pbmc@meta.data[[gran]] <- x
+  
+}
+Idents(pbmc) <- "cell.type.medium"
+
+```
+
+
+```{r}
+
+DimPlot(pbmc, reduction = "umap") + #, group.by = "source"
+  ggtitle(paste("Cells Donor")) +
+  theme(legend.position = "right")
+
+```
+
+```{r}
+
+saveRDS(pbmc, "COVIDatlas_MAIT_labelled.seu.rds")
+
+```
+

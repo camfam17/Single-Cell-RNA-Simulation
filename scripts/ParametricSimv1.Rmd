@@ -1,0 +1,214 @@
+---
+title: "LoadAndSim"
+output: html_document
+---
+
+
+
+```{r}
+
+library(scDesign2)
+library(Matrix)
+library(Matrix.utils)
+library(Seurat)
+library(plyr)
+library(dplyr)
+library(Seurat)
+library(sctransform)
+library(igraph)
+library(factoextra)
+library(ComplexHeatmap)
+library(circlize)
+library(EpicTools)
+require(Hmisc)
+require(dplyr)
+require(openxlsx)
+require(ggplot2)
+library(ggpubr)
+require(cowplot)
+library(data.table)
+library(RColorBrewer)
+library(rowr)
+library(SingleR)
+library(scater)
+library(pheatmap)
+library(nichenetr)
+library(tidyverse)
+
+```
+
+
+
+```{r}
+
+label_map1 <- c(
+  "RBC" = "RBC",
+  "B" = "B",
+  "PB" = "PB",
+  "CD14 Monocyte" = "Monocyte",
+  "CD16 Monocyte" = "Monocyte",
+  "CD8 T" = "T_all",
+  "CD4 T" = "T_all",
+  "gd T" = "T_all",
+  "Platelet" = "Platelet",
+  "NK" = "NK",
+  "Granulocyte" = "Granulocyte",
+  "DC" = "DC",
+  "pDC" = "DC"
+)
+
+coarsen_labels <- function(x) {
+  out <- unname(label_map1[x])     # vectorized lookup
+  out[is.na(out)] <- x[is.na(out)] # keep originals if not in map
+  out
+}
+
+print("Loading data")
+covid_combined.nc = readRDS("~/RFolder2/downloaded.blish_covid.seu.rds")
+
+print("Organising cell labels")
+# Rename and add coarsened labels
+covid_combined.nc$cell.type <- NULL
+colnames(covid_combined.nc@meta.data)[colnames(covid_combined.nc@meta.data) == "cell.type.coarse"] <- "cell.type.medium"
+covid_combined.nc$cell.type.coarse <- coarsen_labels(covid_combined.nc$cell.type.medium)
+
+```
+
+
+```{r}
+
+target <- "All" # COVID
+column <- "Status"
+# target <- "H1" # C2
+# column <- "Donor"
+label_granularity <- "coarse" # coarse # fine
+gene_filter <- 0.00
+zp.cutoff <- 0.8
+
+```
+
+```{r}
+
+print("Subsetting Suerat obj")
+if(tolower(target) != 'all'){
+  # covid_combined.nc <- subset(covid_combined.nc, subset = get(column) == target) # `Status`
+  keep_cells <- covid_combined.nc@meta.data[[column]] == target
+  covid_combined.nc <- subset(covid_combined.nc, cells = colnames(covid_combined.nc)[keep_cells])
+}
+
+print("Extracting and labeling count matrix")
+# Extract count matrix from Seurat object
+rawcounts <- GetAssayData(covid_combined.nc, assay = "RNA", slot = "counts")
+
+# Label count matrix with cell type for scDesign2
+labels <- covid_combined.nc@meta.data[colnames(rawcounts), paste("cell.type", label_granularity, sep=".")]
+colnames(rawcounts) <- labels
+
+
+print("Filtering low genes")
+# Filter low count genes
+keep <- Matrix::rowSums(rawcounts > 0) >= gene_filter * ncol(rawcounts)  # Remove genes that are expressed in less than 1% of cells
+rawcounts <- rawcounts[keep, , drop=FALSE]
+
+```
+
+```{r}
+
+set.seed(1)
+RNGkind("L'Ecuyer-CMRG")   # good practice for parallel RNG
+
+fit <- readRDS(paste("~/RFolder2/scDesign2FitModels/fit_", column, target, "_label", label_granularity, "_genefilter", gene_filter, "_zpcutoff", zp.cutoff, ".rds", sep=""))
+
+```
+
+```{r}
+
+simcount1 <- simulate_count_scDesign2(
+  model_params   = fit,
+  n_cell_new     = ncol(rawcounts), # match input ncells
+  cell_type_prop = prop.table(table(colnames(rawcounts))), # match input cell proportions
+  total_count_new = NULL, 
+  sim_method     = "copula",          # must match how you fit
+  reseq_method   = "mean_scale",      # or "multinomial" to force exact depth
+  cell_sample    = FALSE
+)
+rownames(simcount1) <- rownames(rawcounts)
+simcount1 <- Matrix(simcount1, sparse = TRUE)
+
+saveRDS(simcount1, file = paste("~/RFolder2/scDesign2CountMatrices/data_", column, target, "_lbl", label_granularity, "_gf", gene_filter, "_zp", zp.cutoff, ".rds", sep=""))
+print("data saved")
+
+```
+
+```{r}
+
+matprops <- function(countmat, mat_type){
+  
+  dimensions <- dim(countmat)
+  size <- length(countmat)
+  depth <- sum(countmat)
+  proportion_of_zeros <- sum(countmat == 0) / length(countmat)
+  
+  cat("Dimensions: ", dimensions, "(size: ", size, ")\n")
+  cat("Depth: ", depth, "\n")
+  cat("proportion of zeros", proportion_of_zeros, "\n")
+  
+  
+  colSums(countmat) |> hist(50, main=paste(mat_type, "lib sizes"))
+  hist(log10(Matrix::colSums(countmat) + 1), breaks = 50, main = paste(mat_type, "log lib size"), xlab = "log10(UMIs)")
+  image(countmat[1000:1800, 1:1500], main = paste("Sparsity barcode (", mat_type, ")")) # sparsity_barcode
+  
+}
+
+```
+
+
+```{r}
+
+matprops(rawcounts, "real")
+print("")
+matprops(simcount1, "sim")
+
+```
+
+
+```{r}
+
+celltypes <- rownames(rawcounts)
+colnames(rawcounts) <- paste0("557.", seq_len(ncol(rawcounts)))
+
+# 1.  wrap each matrix in a tiny Seurat object
+real_obj <- CreateSeuratObject(counts = rawcounts,
+                               project = "Real",
+                               min.cells = 0, min.features = 0)
+real_obj$source <- "Real"       # label cells
+real_obj$cell.type <- celltypes
+
+celltypes <- rownames(simcount1)
+colnames(simcount1) <- paste0("557.", seq_len(ncol(simcount1)))
+sim_obj  <- CreateSeuratObject(counts = simcount1,
+                               project = "Sim",
+                               min.cells = 0, min.features = 0)
+sim_obj$source <- "Sim"         # label cells
+sim_obj$cell.type <- celltypes
+
+# 2.  merge → shared feature space (union of genes)
+combo <- merge(real_obj, sim_obj)
+
+# 3.  quick preprocessing
+combo <- NormalizeData(combo, verbose = FALSE)
+# combo <- FindVariableFeatures(combo, nfeatures = min(2000, nrow(combo)), verbose = FALSE)
+VariableFeatures(combo) <- rownames(combo)    # take *all* genes
+combo <- ScaleData(combo, verbose = FALSE)
+combo <- RunPCA(combo, npcs = 30, verbose = FALSE)
+combo <- RunUMAP(combo, dims = 1:30, verbose = FALSE)
+
+# 4.  UMAP coloured by source
+DimPlot(combo, reduction = "umap", group.by = "source") +
+  ggtitle(paste("Real vs Simulated cells, Donor", target)) +
+  theme(legend.position = "right")
+
+
+```
+
+

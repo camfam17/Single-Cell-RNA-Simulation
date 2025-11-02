@@ -77,9 +77,9 @@ genes.signature <- c("KLRB1", "IL7R", "LTB", "CEBPD", "FOS", "AQP3", "SLC4A10", 
 - Load data and subset according to parameters above
 ```{r}
 
-output.folder = "~/TidyFolder/data/part1/"
+output.folder = "~/TidyScripts/data/part1/"
 
-scdata <- readRDS("~/MAITSim/COVIDatlas_MAIT_labelled.seu.rds")
+scdata <- readRDS("~/TidyScripts/COVIDatlas_MAIT_labelled.seu.rds")
 
 if(tolower(target) != 'all'){
   keep_cells <- scdata@meta.data[[column]] == target
