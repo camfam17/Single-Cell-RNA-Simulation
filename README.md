@@ -6,10 +6,11 @@
  - to simulate single-cell RNA at different cell counts and sequencing depths to analyse how those parameters affect the detectability and downstream analysis of Mucosal-Associated Invariant T (MAIT) cells  
   
   
+  
 ## Analysis Notebooks:
-Part 1 - Real vs Simulated Data: Notebook evaluating the fidelity of simulated scRNA-seq data against real data using SimBench, including structural, quantitative, biological, and gene-signature fidelity analyses.  
-Part 2 - Grid Search: Notebook performing a grid search over cell count and sequencing depth to assess simulation design effects on data fidelity and rare cell (MAIT) detectability.  
-Part 3 - Application/Replication: Notebook replicating downstream MAIT cell analyses (gene signatures, differential expression, gene panels) on real and simulated datasets to assess biological interpretability.    
+**Part 1** - Real vs Simulated Data: Notebook evaluating the fidelity of simulated scRNA-seq data against real data using SimBench, including structural, quantitative, biological, and gene-signature fidelity analyses.  
+**Part 2** - Grid Search: Notebook performing a grid search over cell count and sequencing depth to assess simulation design effects on data fidelity and rare cell (MAIT) detectability.  
+**Part 3** - Application/Replication: Notebook replicating downstream MAIT cell analyses (gene signatures, differential expression, gene panels) on real and simulated datasets to assess biological interpretability.    
   
 Each notebook has been knit into an HTML file, so you can see the executed code and its outputs without running the code yourself.  
 Executing the code with the full COVID-19 dataset can require up to 60GB of memory. The data can be subset to, for example, a single patient (Donor == C1) to allow for much faster and leaner execution - though the results will obviously differ from the main study.  
@@ -36,5 +37,11 @@ if (file.exists(fit.filename)){
 ```
 
 
-You are welcome to hide those files so that they will be generated from scratch. Please note in some cases, like trainnig the scDesign2 model on the full dataset, can take 12-24 hours.  Simulations can take up to 20 minutes on the full dataset at the higher sequencing depths.  
+You are welcome to hide those files so that they will be generated from scratch. Please note in some cases, like training the scDesign2 model on the full dataset, can take 12-24 hours.  Simulations can take up to 20 minutes on the full dataset at the higher sequencing depths.  
 The files in the "setup/" folder contain R scripts that can be executed in a non-interactive setting (unlike notebooks). These scripts can be use to train and fit models, run certain analyses and save them to disk to later be loaded by the notebooks.  
+
+  
+
+
+## Figures  
+Figures that appear in the report are in "data/plots"   
