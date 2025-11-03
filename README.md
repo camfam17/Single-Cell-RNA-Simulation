@@ -12,8 +12,8 @@
 **Part 2** - Grid Search: Notebook performing a grid search over cell count and sequencing depth to assess simulation design effects on data fidelity and rare cell (MAIT) detectability.  
 **Part 3** - Application/Replication: Notebook replicating downstream MAIT cell analyses (gene signatures, differential expression, gene panels) on real and simulated datasets to assess biological interpretability.    
   
-Each notebook has been knit into an HTML file, so you can see the executed code and its outputs without running the code yourself. Found in "data/".
-Executing the code with the full COVID-19 dataset can require up to 60GB of memory. The data can be subset to, for example, a single patient (Donor == C1) to allow for much faster and leaner execution - though the results will obviously differ from the main study.  
+Each notebook has been knit into an HTML file, so you can see the executed code and its outputs without running the code yourself. Found in "data/".  
+Executing the code with the full COVID-19 dataset can require up to 60GB of memory. The data can be subset to, for example, a single patient to allow for much faster and leaner execution - though the results will obviously differ from the main study.  
 e.g.:  
 ```{r}
 target <- "H1"
